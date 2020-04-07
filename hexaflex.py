@@ -5,6 +5,14 @@ from math import sqrt
 from PIL import Image, ImageDraw
 
 
+def _sgn(x):
+    if x < 0:
+        return -1
+    if x > 0:
+        return 1
+    return 0
+
+
 def _make_triangle_mask(triangle) -> Image:
     (ax, ay), (bx, by), (cx, cy) = triangle
     min_x = min(ax, bx, cx)
@@ -52,7 +60,7 @@ def _get_image_slice_rect(img, index):
 
 class Hexaflex:
     def __init__(self, size=1024, gap=16, line_width=16, line_fill=(0, 0, 0, 255), both_sides=True, six_sided=True,
-                 textures=None):
+                 texture_gap=False, textures=None):
         num_textures = 6 if six_sided else 3
         if textures is None:
             textures = [None] * num_textures
@@ -64,6 +72,7 @@ class Hexaflex:
         self.line_fill = line_fill
         self.double_sided = both_sides
         self.six_sided = six_sided
+        self.texture_gap = texture_gap
         self.textures = textures
 
     @property
@@ -72,12 +81,12 @@ class Hexaflex:
 
     @property
     def image_width(self):
-        return self.width + self.line_width + self.gap
+        return self.width + self.line_width
 
     @property
     def image_height(self):
         tri = self.num_triangles
-        return int(self.size * (tri + 1) / 2 + self.line_width + self.gap * (tri - 1))
+        return int(self.size * (tri + 1) / 2 + self.line_width * (tri - 1))
 
     @property
     def triangle_width(self):
@@ -88,40 +97,63 @@ class Hexaflex:
         width = self.triangle_width
         if self.double_sided:
             width *= 2
-            width += self.gap
         return int(width)
 
-    def _get_triangles(self, left_x: int, right_x: int):
+    def _get_triangles(self, left_x: int, right_x: int, shrink=False):
+        if shrink:
+            if left_x < right_x:
+                left_x += int(self.gap * sqrt(3) - self.gap / 2)
+                right_x -= self.gap // 2
+            else:
+                left_x -= int(self.gap * sqrt(3) - self.gap / 2)
+                right_x += self.gap // 2
+            dy = self.gap
+            box = 0, 0, abs(right_x - left_x), self.size
+        else:
+            diff = int((sqrt(3) - 1) / 2 * self.gap)
+            if left_x < right_x:
+                left_x += diff
+                right_x += diff
+            else:
+                left_x -= diff
+                right_x -= diff
+            box = diff, 0, abs(right_x - left_x) - diff, self.size
+            dy = 0
+
         right = self.line_width // 2
         left = right + self.size // 2
         for i in range(self.num_triangles):
             if left < right:
-                yield (left_x, left), (right_x, right), (left_x, left + self.size)
+                yield ((left_x, left + dy), (right_x, right), (left_x, left + self.size - dy)), box
                 left += self.size
             else:
-                yield (right_x, right), (left_x, left), (right_x, right + self.size)
+                yield ((right_x, right + dy), (left_x, left), (right_x, right + self.size - dy)), box
                 right += self.size
-            left += self.gap
-            right += self.gap
 
-    @property
-    def triangles_left(self):
+    def _get_triangles_left(self, shrink=0):
         left_x = self.line_width // 2
         right_x = left_x + self.triangle_width
-        return self._get_triangles(left_x, right_x)
+        return self._get_triangles(left_x, right_x, shrink)
 
-    @property
-    def triangles_right(self):
+    def _get_triangles_right(self, shrink=0):
         if not self.double_sided:
             return
-        left_x = self.line_width // 2 + 2 * self.triangle_width + self.gap
+        left_x = self.line_width // 2 + 2 * self.triangle_width
         right_x = left_x - self.triangle_width
-        return self._get_triangles(left_x, right_x)
+        return self._get_triangles(left_x, right_x, shrink)
+
+    @property
+    def shrunk_triangles(self):
+        yield from self._get_triangles_left(shrink=self.gap)
+        yield from self._get_triangles_right(shrink=self.gap)
 
     @property
     def triangles(self):
-        yield from self.triangles_left
-        yield from self.triangles_right
+        if self.texture_gap:
+            yield from self.shrunk_triangles
+        else:
+            yield from self._get_triangles_left()
+            yield from self._get_triangles_right()
 
     @property
     def patterns(self):
@@ -199,7 +231,7 @@ class Hexaflex:
         masks = None
         draw = ImageDraw.Draw(img)
         line_opts = dict(width=self.line_width, fill=self.line_fill)
-        for tri, (tex_index, tex_slice, tex_rot) in zip(self.triangles, self.patterns):
+        for (tri, box), (tex_index, tex_slice, tex_rot) in zip(self.triangles, self.patterns):
             if tex_index is not None and self.textures[tex_index] is not None:
                 if masks is None:
                     mask = _make_triangle_mask(tri)
@@ -217,8 +249,12 @@ class Hexaflex:
                 slice = slice.crop(slice.getbbox())
                 slice_mask = _make_triangle_mask(tri)
                 slice = slice.resize(slice_mask.size)
-                img.paste(slice, box=_get_triangle_top_left(tri), mask=slice_mask)
-            if self.line_width > 0:
+                # Take only the part of slice_mask inside box
+                slice_mask_2 = Image.new('1', slice_mask.size)
+                slice_mask_2.paste(slice_mask.crop(box), box=box)
+                img.paste(slice, box=_get_triangle_top_left(tri), mask=slice_mask_2)
+        if self.line_width > 0:
+            for (tri, _) in self.shrunk_triangles:
                 draw.line((*tri, tri[0]), **line_opts)
         return img
 
@@ -235,6 +271,8 @@ def main():
                         help='use hexahexaflexagon (6 sides) (default: trihexaflexagon (3 sides))')
     parser.add_argument('-o', '--output', dest='output', action='store', default='hexaflex.png',
                         help='output filename (default: hexaflex.png)')
+    parser.add_argument('--texture-gap', dest='texture_gap', action='store_true',
+                        help='also apply gap to textures (default: off)')
     parser.add_argument('texture', type=str, nargs='*',
                         help='image files to use as textures (default: none)')
     args = parser.parse_args()
@@ -243,6 +281,7 @@ def main():
         gap=args.gap,
         line_width=args.line_width,
         six_sided=args.six_sided,
+        texture_gap=args.texture_gap,
         textures=list(map(Image.open, args.texture)),
     ).to_image().save(args.output)
 
