@@ -243,7 +243,7 @@ def main():
         gap=args.gap,
         line_width=args.line_width,
         six_sided=args.six_sided,
-        textures=list(map(Image.open, args.textures)),
+        textures=list(map(Image.open, args.texture)),
     ).to_image().save(args.output)
 
 
